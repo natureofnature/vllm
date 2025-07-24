@@ -162,6 +162,22 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+        # NOTE: True is processing a very long sequence
+        self.is_dcpp: bool = False
+        self.large_sequence_thres = self.scheduler_config.large_sequence_thres
+        self.p_ratio: int = 15*2048
+
+    def compute_chunk_size_with_overhead(self, hist_seq_len, seq_len, chunk_size, p, block_size):
+        T = chunk_size * (p + chunk_size)  # 目标计算时间
+        discriminant = (p + hist_seq_len)**2 + 4*T
+        dcpp_chunk = int((-(p + hist_seq_len) + discriminant**0.5) / 2)
+        dcpp_chunk = (dcpp_chunk + block_size - 1) // block_size * block_size
+        scheduled_chunk = dcpp_chunk
+        dcpp_chunk = min(dcpp_chunk, seq_len - hist_seq_len)
+        logger.info(f"=====> Computed p value is {p}, dcpp_chunk {dcpp_chunk}, scheduled_chunk {scheduled_chunk}")
+        return dcpp_chunk, scheduled_chunk
+
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -202,11 +218,15 @@ class Scheduler(SchedulerInterface):
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
+            dcpp_origin_chunk = None
             request = self.running[req_index]
 
+            if request.num_tokens - request.num_computed_tokens < request.dcpp_scheduled_chunk:
+                request.is_dcpp = False
+
             num_new_tokens = (request.num_tokens_with_spec +
-                              request.num_output_placeholders -
-                              request.num_computed_tokens)
+                                request.num_output_placeholders -
+                                request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
                 num_new_tokens = (
@@ -227,6 +247,23 @@ class Scheduler(SchedulerInterface):
                  new_encoder_budget) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_budget)
+
+
+            if request.is_dcpp:
+                # Shorten length to reduce long kv history effect
+                # Target execution time is num_new_tokens execution time without history
+                dcpp_origin_chunk = num_new_tokens
+                num_new_tokens, dcpp_scheduled_chunk = self.compute_chunk_size_with_overhead(
+                                                                        request.num_computed_tokens,
+                                                                        request.num_tokens,
+                                                                        num_new_tokens,
+                                                                        self.p_ratio,
+                                                                        self.cache_config.block_size)
+                num_new_tokens = min(request.num_tokens - request.num_computed_tokens, max(512, num_new_tokens))
+                request.dcpp_scheduled_chunk = dcpp_scheduled_chunk
+
+                logger.info(f"=====> num new tokens for dcpp is {num_new_tokens}, try to match origin chunk size {dcpp_origin_chunk}")
+
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -293,7 +330,7 @@ class Scheduler(SchedulerInterface):
             req_to_new_block_ids[request.request_id] = (
                 new_blocks.get_block_ids())
             num_scheduled_tokens[request.request_id] = num_new_tokens
-            token_budget -= num_new_tokens
+            token_budget -= (num_new_tokens if dcpp_origin_chunk is None else dcpp_origin_chunk)
             req_index += 1
 
             # Speculative decode related.
@@ -410,6 +447,11 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    if num_new_tokens > self.large_sequence_thres:
+                        logger.info(f"self.large_sequence_thres {self.large_sequence_thres}, "
+                                    f"num_new_tokens {num_new_tokens}")
+                        request.is_dcpp = True
+
                     if (0 < self.scheduler_config.long_prefill_token_threshold
                             < num_new_tokens):
                         num_new_tokens = (
@@ -512,6 +554,7 @@ class Scheduler(SchedulerInterface):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+        logger.info(f"====> total num scheduled tokens:{total_num_scheduled_tokens}")
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs

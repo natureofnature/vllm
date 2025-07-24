@@ -306,7 +306,6 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
-    data_parallel_start_rank: Optional[int] = None
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
@@ -450,6 +449,8 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
+
+    large_sequence_thres: int = SchedulerConfig.large_sequence_thres
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -838,6 +839,8 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        scheduler_group.add_argument("--large-sequence-thres",
+                                     **scheduler_kwargs["large_sequence_thres"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1296,6 +1299,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            large_sequence_thres=self.large_sequence_thres,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

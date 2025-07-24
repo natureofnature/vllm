@@ -2522,6 +2522,9 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    large_sequence_thres: int = 16000
+    """The large sequence threshold for DCPP"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
