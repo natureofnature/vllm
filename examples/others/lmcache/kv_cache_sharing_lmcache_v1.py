@@ -55,11 +55,13 @@ def run_store(store_done, prompts):
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     llm = LLM(
-        model="mistralai/Mistral-7B-Instruct-v0.2",
+        model="/workspace/wzliu/Qwen2.5-72B",
         kv_transfer_config=ktc,
-        max_model_len=8000,
+        max_model_len=131072,
         gpu_memory_utilization=0.8,
         enforce_eager=True,
+        pp=2,
+        tp=1
     )
 
     outputs = llm.generate(prompts, sampling_params)

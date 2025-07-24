@@ -2522,6 +2522,15 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    enable_dcpp: bool = False
+    """If True, enable dynamic chunk sizing for very long prefills (DCPP)."""
+
+    dcpp_min_chunk: Optional[int] = 512
+    """Minimum chunk size when DCPP shortens chunks. Set to 512 by default."""
+
+    dcpp_length_threshold: int = 16000
+    """Sequence length threshold to consider a request as large for DCPP."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
