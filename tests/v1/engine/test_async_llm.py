@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 from contextlib import ExitStack
 from typing import Optional
 from unittest.mock import MagicMock
@@ -400,3 +401,14 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
 
         # Test 3: Verify healthy engine still works after mock
         await engine.check_health()
+
+        # Kill the EngineCore subprocess
+        engine_core_proc = \
+            engine.engine_core.resources.engine_manager.processes[0]
+
+        os.kill(engine_core_proc.pid, 9)
+        await asyncio.sleep(10)
+
+        # Test 4: Verify engine raises EngineDeadError
+        with pytest.raises(EngineDeadError):
+            await engine.check_health()
