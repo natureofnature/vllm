@@ -668,7 +668,10 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core.resources.engine_dead or not self.is_running
+        # If any subprocess is dead, check_health will raise an EngineDeadError
+        return self.engine_core.resources.engine_dead or \
+                 not self.is_running or \
+                 self.engine_core.resources.engine_manager_processes_dead()
 
     @property
     def dead_error(self) -> BaseException:
