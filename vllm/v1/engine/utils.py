@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 from unittest.mock import patch
 
 import msgspec
+import psutil
 import zmq
 
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -136,10 +137,18 @@ class CoreEngineProcManager:
                             data_parallel) else contextlib.nullcontext():
                     proc.start()
 
+            pids_with_create_time = []
+            for proc in self.processes:
+                if proc.pid is None:
+                    continue
+                with contextlib.suppress(psutil.NoSuchProcess):
+                    pids_with_create_time.append(
+                        (proc.pid, psutil.Process(proc.pid).create_time()))
+
             # Start process that kills orphaned EngineCore processes.
             context.Process(target=EngineProcObserver.track_processes,
-                            args=([proc.pid for proc in self.processes],
-                                  os.getpid(), self.alive_check_interval),
+                            args=(pids_with_create_time, os.getpid(),
+                                  self.alive_check_interval),
                             daemon=True).start()
         finally:
             # Kill other procs if not all are running.

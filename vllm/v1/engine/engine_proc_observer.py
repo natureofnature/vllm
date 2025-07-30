@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
 import time
 
@@ -15,8 +14,8 @@ class EngineProcObserver:
     """For tracking EngineCore orphaned status in background process."""
 
     @staticmethod
-    def track_processes(pids: list[int], parent_pid: int,
-                        alive_check_interval: int):
+    def track_processes(pids_with_create_time: list[tuple[int, float]],
+                        parent_pid: int, alive_check_interval: int):
         """
         Check every alive_check_interval seconds
         whether any EngineCore has been orphaned.
@@ -28,9 +27,16 @@ class EngineProcObserver:
                     "EngineCores have been orphaned... Proceeding to terminate."
                 )
 
-                for pid in pids:
-                    with contextlib.suppress(Exception):
-                        os.kill(pid, 9)
+                for pid, create_time in pids_with_create_time:
+                    try:
+                        if psutil.Process(pid).create_time() == create_time:
+                            os.kill(pid, 9)
+                    except psutil.NoSuchProcess:
+                        # Process already terminated, which is fine.
+                        pass
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to kill orphaned process %d: %s", pid, e)
 
                 return
 
