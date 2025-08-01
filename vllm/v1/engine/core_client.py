@@ -365,32 +365,6 @@ class BackgroundResources:
             self.engine_dead = True
             raise EngineDeadError()
 
-    def engine_manager_processes_dead(self) -> bool:
-        """
-        Return whether any EngineCore process is dead.
-        The method depends on the type of self.engine_manager
-            1. CoreEngineProcManager: multiprocessing.Process.is_alive()
-            2. CoreEngineActorManager: ray.get()
-        """
-        if isinstance(self.engine_manager, CoreEngineProcManager):
-            return any(
-                map(lambda p: 0
-                    if p.is_alive() else 1, self.engine_manager.processes))
-        elif isinstance(self.engine_manager, CoreEngineActorManager):
-            actor_run_refs = self.engine_manager.get_run_refs()
-
-            import ray
-            completed, pending = ray.wait(actor_run_refs, timeout=5)
-
-            # Check for completed tasks
-            for ref in completed:
-                try:
-                    # This will raise an exception if the task has crashed
-                    ray.get(ref)
-                except ray.exceptions.RayTaskError:
-                    return True
-        return False
-
 
 class MPClient(EngineCoreClient):
     """
