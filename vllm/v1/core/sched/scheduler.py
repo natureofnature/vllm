@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -34,6 +35,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.model_executor.flops_estimator import create_estimator
 
 logger = init_logger(__name__)
 
@@ -163,18 +165,28 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
         # NOTE: True is processing a very long sequence
+        self.attn_estimator = create_estimator(config_path=os.path.join(
+            vllm_config.model_config.model_path, "config.json"))
         self.is_dcpp: bool = False
         self.large_sequence_thres = self.scheduler_config.large_sequence_thres
-        self.p_ratio: int = 15*2048
+        # Use the long prefill threshold (if set) as the baseline chunk size
+        # for computing attention-equivalent history tokens; else fall back.
+        _baseline_c = getattr(self.scheduler_config, 'long_prefill_token_threshold', None)
+        if _baseline_c is None or _baseline_c <= 0:
+            _baseline_c = 2048
+        self.p_equiv_tokens: int = int(self.attn_estimator.estimate_flops_ratio_scaled(_baseline_c, 0))
+        logger.info(
+            f"=====> p_equiv_tokens (attention-equivalent tokens) is {self.p_equiv_tokens} using baseline chunk {_baseline_c}")
 
-    def compute_chunk_size_with_overhead(self, hist_seq_len, seq_len, chunk_size, p, block_size):
-        T = chunk_size * (p + chunk_size)  # 目标计算时间
-        discriminant = (p + hist_seq_len)**2 + 4*T
-        dcpp_chunk = int((-(p + hist_seq_len) + discriminant**0.5) / 2)
+    def compute_chunk_size_with_overhead(self, hist_seq_len, seq_len, chunk_size, p_equiv_tokens, block_size):
+        T = chunk_size * (p_equiv_tokens + chunk_size)  # 目标计算时间
+        discriminant = (p_equiv_tokens + hist_seq_len)**2 + 4 * T
+        dcpp_chunk = int((-(p_equiv_tokens + hist_seq_len) + discriminant**0.5) / 2)
         dcpp_chunk = (dcpp_chunk + block_size - 1) // block_size * block_size
         scheduled_chunk = dcpp_chunk
         dcpp_chunk = min(dcpp_chunk, seq_len - hist_seq_len)
-        logger.info(f"=====> Computed p value is {p}, dcpp_chunk {dcpp_chunk}, scheduled_chunk {scheduled_chunk}")
+        logger.info(f"=====> Computed p value is {p_equiv_tokens}, dcpp_chunk {dcpp_chunk}, scheduled_chunk {scheduled_chunk}")
+        # if remaining seq length is less than scheduled_chunk, then dispatch all the remaining tokens
         return dcpp_chunk, scheduled_chunk
 
 
@@ -257,8 +269,9 @@ class Scheduler(SchedulerInterface):
                                                                         request.num_computed_tokens,
                                                                         request.num_tokens,
                                                                         num_new_tokens,
-                                                                        self.p_ratio,
+                                                                        self.p_equiv_tokens,
                                                                         self.cache_config.block_size)
+                # NOTE: Prevent short tail effect
                 num_new_tokens = min(request.num_tokens - request.num_computed_tokens, max(512, num_new_tokens))
                 request.dcpp_scheduled_chunk = dcpp_scheduled_chunk
 
@@ -330,6 +343,9 @@ class Scheduler(SchedulerInterface):
             req_to_new_block_ids[request.request_id] = (
                 new_blocks.get_block_ids())
             num_scheduled_tokens[request.request_id] = num_new_tokens
+            # NOTE: If dcpp is enabled, use the original chunk size to update token budget but 
+            # keep the shortened chunk size for the request to keep similar execution time between each step.
+            # Otherwise, use the scheduled chunk size
             token_budget -= (num_new_tokens if dcpp_origin_chunk is None else dcpp_origin_chunk)
             req_index += 1
 
